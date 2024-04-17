@@ -1,27 +1,40 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-
-    <title>Joke App</title>
-
-    <link rel="stylesheet" href="/static/style.css">
+    <title>Stream Jokes</title>
 </head>
-
 <body>
-    <div class="container">
-        <h1>This app is a joke</h1>
+    <input id="inputText" type="text" placeholder="Enter topic">
+    <button onclick="startStream()">Get Joke</button>
+    <div id="jokeText"></div>
+    <audio id="jokeAudio" controls></audio>
 
-        <input type="text" id="inputText" placeholder="What do you want to joke about?">
+    <script>
+        function startStream() {
+            const inputText = document.getElementById('inputText').value;
+            const socket = new WebSocket(`ws://localhost:8000/ws/stream?input_text=${encodeURIComponent(inputText)}`);
 
-        <button id="generateButton">Jot joke</button>
+            socket.onmessage = function(event) {
+                if (typeof event.data === 'string') {
+                    document.getElementById('jokeText').textContent = event.data;
+                } else {
+                    const arrayBuffer = new Uint8Array(event.data);
+                    const blob = new Blob([arrayBuffer], { type: 'audio/opus' });
+                    const url = URL.createObjectURL(blob);
+                    document.getElementById('jokeAudio').src = url;
+                    document.getElementById('jokeAudio').play();
+                }
+            };
 
-        <textarea id="outputText" placeholder="Joke will be output here" readonly></textarea>
-    </div>
+            socket.onclose = function(event) {
+                console.log('Connection closed', event);
+            };
 
-    <script src="/static/script.js"></script>
+            socket.onerror = function(error) {
+                console.log('WebSocket Error:', error);
+            };
+        }
+    </script>
 </body>
-
 </html>

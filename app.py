@@ -1,87 +1,76 @@
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse
-from fastapi.staticfiles import StaticFiles
-from fastapi.middleware.cors import CORSMiddleware
-
+from fastapi import FastAPI, WebSocket
+from fastapi.responses import FileResponse
 import uvicorn
-from dotenv import load_dotenv
+from openai import OpenAI
+import requests, tempfile, asyncio, os
 
-from langchain.chat_models import ChatOpenAI
-from langchain.schema import StrOutputParser
-from langchain.prompts import PromptTemplate
-from langchain_core.runnables import RunnablePassthrough
-
-# Load environment variables
-load_dotenv()
-
-# Initialize FastAPI app
 app = FastAPI()
+client = OpenAI(api_key="API_KEY")
 
-# Mount static files
-app.mount("/static", StaticFiles(directory="static"), name="static")
+@app.get("/")
+async def main():
+    return FileResponse('static/index.html')
 
-# Add CORS middleware for cross-origin resource sharing
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+@app.websocket("/ws/stream")
+async def websocket_endpoint(websocket: WebSocket, input_text: str):
+    await websocket.accept()
+    try:
+        completion = client.chat.completions.create(
+            model='gpt-3.5-turbo',
+            messages=[
+                {"role": "system", "content": "You are a friendly AI assistant."},
+                {"role": "user", "content": input_text},
+            ],
+            # stream=True,
+            temperature=0,
+            # max_tokens=500,
+        )
 
-# Prompt template for generating jokes
-prompt = PromptTemplate.from_template(
-    """
-    Create a clever and humorous joke or pun that is specifically related to '{input}'. 
-    The joke or pun should be original, light-hearted, and suitable for a general audience.
-    It should cleverly play on words or concepts directly associated with '{input}', ensuring the humor is directly tied to the unique characteristics or well-known aspects of the topic.
-    """
-)
+        joke_text = completion.choices[0].message.content
+        print(joke_text)
+        await websocket.send_text(joke_text)
 
-# Chat model configuration
-model = ChatOpenAI(model_name="gpt-4", temperature=0)
+        audio_data = await generate_audio(joke_text, websocket)
+        if audio_data:
+            await websocket.send_bytes(audio_data)
+    except Exception as e:
+        await websocket.send_text(str(e))
+    finally:
+        await websocket.close()
 
-# Processing chain setup
-chain = {"input": RunnablePassthrough()} | prompt | model | StrOutputParser()
+import aiohttp
+import asyncio
 
+async def generate_audio(text, websocket):
+    url = "https://api.openai.com/v1/audio/speech"
+    headers = {
+        "Authorization": "Bearer API_KEY",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "model": "tts-1",
+        "input": text,
+        "voice": "nova",
+        "response_format": "opus",
+    }
 
-@app.get("/joke")
-async def write_joke(input: str):
-    """
-    Endpoint to write a joke based on the input string.
-    :param input: Input string to base the joke on.
-    :return: StreamingResponse of the joke.
-    """
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, headers=headers, json=data) as response:
+            if response.status == 200:
+                headers = response.headers
+                content_type = headers.get("Content-Type")
+                content_length = int(headers.get("Content-Length"))
 
-    async def stream():
-        async for chunk in chain.astream(input):
-            formatted_chunk = format_chunk(chunk)
-            yield f"data: {formatted_chunk}\n\n"
+                # Set the response headers to match the audio file
+                websocket.response.headers["Content-Type"] = content_type
+                websocket.response.headers["Content-Length"] = content_length
 
-    headers = {"Content-Type": "text/event-stream; charset=utf-8"}
-    return StreamingResponse(stream(), headers=headers)
+                # Stream the audio data directly to the client
+                async for chunk in response.content.iter_chunked(4096):
+                    await websocket.send_bytes(chunk)
+            else:
+                print(f"Error: {response.status} - {await response.text()}")
+                await websocket.send_text(f"Error: {response.status} - {await response.text()}")
 
-
-def format_chunk(chunk: str) -> str:
-    """
-    Formats a chunk of text for streaming.
-    :param chunk: The text chunk to be formatted.
-    :return: Formatted text chunk.
-    """
-    return (
-        chunk.replace("\n", "<new-line>").replace("\t", "<tab>").replace(" ", "<space>")
-    )
-
-
-@app.get("/", response_class=HTMLResponse)
-async def read_index():
-    """
-    Endpoint to serve the index HTML page.
-    :return: FileResponse of the index.html file.
-    """
-    return FileResponse("static/index.html")
-
-
-# Main entry point for the application
 if __name__ == "__main__":
-    uvicorn.run("app:app", host="127.0.0.1", port=8000, reload=True)
+    uvicorn.run(app, host="127.0.0.1", port=8000)
